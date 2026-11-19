@@ -28,7 +28,7 @@ a { color: inherit; text-decoration: none; }
 .header-location { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
 .mobile-menu { display: none; border: 0; background: transparent; color: var(--navy); }
 .hero { height: 415px; position: relative; background: #52626a; color: #fff; }
-.hero-image { position: absolute; inset: 0; background: url('https://images.unsplash.com/photo-1566073771259-6a8506099945?auto=format&fit=crop&w=2200&q=90') center 52%/cover; }
+.hero-image { position: absolute; inset: 0; background: url(/public/images/rubyhotel.jpg) center 52%/cover; }
 .hero-shade { position: absolute; inset: 0; background: linear-gradient(90deg, rgba(19,38,52,.72), rgba(19,38,52,.24) 63%, rgba(19,38,52,.04)); }
 .hero-copy { position: absolute; left: 9%; top: 50%; transform: translateY(-48%); }
 .hero-kicker, .eyebrow { font-size: 10px; letter-spacing: 1.25px; font-weight: 600; }

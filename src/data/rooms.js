@@ -7,7 +7,7 @@ export const rooms = [
     description: 'A calm, comfortable room for an easy city stay.',
     features: ['Queen bed', '2 guests', 'Wi-Fi'],
     pricePerNight: 65000,
-    image: 'https://images.unsplash.com/photo-1611892440504-42a792e24d32?auto=format&fit=crop&w=1000&q=85',
+    image: './public/images/standardroom.jpg',
     imageAlt: 'Bright hotel room with a neatly made bed',
   },
   {
