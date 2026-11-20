@@ -16,7 +16,7 @@ export const rooms = [
     description: 'A restful retreat with a king bed and warm interiors.',
     features: ['King bed', '2 guests', '32 m²'],
     pricePerNight: 90000,
-    image: 'https://images.unsplash.com/photo-1629140727571-9b5c6f6267b4?w=500&auto=format&fit=crop&q=60&ixlib=rb-4.1.0&ixid=NHwxMjA3fDA%3D',
+    image: 'https://images.unsplash.com/photo-1702014861736-d62834317c5e?w=500&auto=format&fit=crop&q=60&ixlib=rb-4.1.0&ixid=NHwxMjA3fDA%3D',
     imageAlt: 'Warm and inviting hotel room',
   },
   {
