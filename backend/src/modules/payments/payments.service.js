@@ -83,7 +83,7 @@ export const initializePayment = async (bookingId) => {
                     amount: booking.totalAmount,
                     reference,
                     currency: booking.currency,
-                    callback_url: "http://localhost:3000/payment/callback",
+                    callback_url: process.env.PAYSTACK_CALLBACK_URL,
                 }),
             }
         );
