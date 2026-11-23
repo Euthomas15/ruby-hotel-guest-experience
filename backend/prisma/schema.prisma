@@ -1,0 +1,122 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+
+model Room {
+  id            String   @id @default(uuid())
+  name          String   @unique
+  description   String
+  imageUrl      String
+  imageAlt      String?
+  pricePerNight Int
+  currency      String   @default("NGN")
+  capacity      Int
+  totalUnits    Int      @default(1)
+  features      String[]
+  isActive      Boolean  @default(true)
+
+  bookings      Booking[]
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+enum BookingStatus {
+  pending_payment
+  confirmed
+  cancelled
+}
+
+enum PaymentStatus {
+  pending
+  verified
+  failed
+}
+
+enum ServiceRequestStatus {
+  received
+  in_progress
+  completed
+}
+
+
+model Booking {
+  id              String        @id @default(uuid())
+  bookingReference String       @unique
+
+  guestName       String
+  guestEmail      String
+  guestPhone      String
+
+  roomId          String
+  room            Room          @relation(fields: [roomId], references: [id])
+
+  checkIn         DateTime
+  checkOut        DateTime
+  guests          Int
+
+  nightlyRate     Int
+  subtotal        Int
+  tax             Int            @default(0)
+  totalAmount     Int
+  currency        String         @default("NGN")
+
+  status          BookingStatus  @default(pending_payment)
+
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  payments Payment[]
+  serviceRequests ServiceRequest[]
+  expiresAt DateTime?
+  @@index([roomId, status, checkIn, checkOut])
+  @@index([status, expiresAt])
+
+}
+
+model Payment {
+  id                String        @id @default(uuid())
+
+  bookingId         String
+  booking           Booking       @relation(fields: [bookingId], references: [id])
+
+  provider          String        @default("paystack")
+  providerReference String        @unique
+
+  amount            Int
+  currency          String        @default("NGN")
+
+  status            PaymentStatus @default(pending)
+
+  paidAt            DateTime?
+
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  authorizationUrl String?
+}
+
+model ServiceRequest {
+  id          String                @id @default(uuid())
+
+  bookingId   String
+  booking     Booking               @relation(fields: [bookingId], references: [id])
+
+  category    String
+  description String
+
+  status      ServiceRequestStatus  @default(received)
+
+  completedAt DateTime?
+
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+}
