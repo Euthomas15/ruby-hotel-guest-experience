@@ -10,7 +10,12 @@ const app = express();
 
 
 //MIDDLEWARES
-app.use(cors({ origin: "http://localhost:5173",credentials: true,}));
+
+const allowedOrigins = [
+    "http://localhost:5173",
+    "http://ruby-hotel-guest-experience.vercel.app"
+];
+app.use(cors({ origin: allowedOrigins,credentials: true,}));
 app.use("/api/payments/paystack/webhook", express.raw({ type: "application/json"}));
 app.use(express.json());
 app.use(express.urlencoded({extended : true}));
