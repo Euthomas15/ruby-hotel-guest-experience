@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft, ArrowRight, CalendarDays, Check, CheckCircle2, ChevronDown,
   Clock3, ConciergeBell, DoorOpen, MapPin, Menu, ShieldCheck,
   Sparkles, Wifi,
 } from 'lucide-react';
 import { formatNaira, rooms } from './data/rooms.js';
+import { createBooking, createServiceRequest, findBooking, getAvailableRooms, getServiceRequests, initializePaystack, verifyPaystack } from './services/api.js';
 
 const DEMO_REFERENCE = 'RUB-260112';
 const VAT_RATE = 0.075;
@@ -59,7 +60,7 @@ function StayCard({ room, checkIn, checkOut, guests, nights, total, compact = fa
       <h3>{room?.name || 'Choose a room'}</h3>
       <p>{checkIn} - {checkOut} · {nights} {nights === 1 ? 'night' : 'nights'}</p>
       <p>1 room · {guests} {guests === 1 ? 'guest' : 'guests'}</p>
-      {total != null && <div className="stay-total"><span>Total including VAT</span><strong>{formatNaira(total)}</strong></div>}
+      {total != null && <div className="stay-total"><span>Stay total</span><strong>{formatNaira(total)}</strong></div>}
     </Panel>
   );
 }
@@ -91,7 +92,7 @@ function BookingSearch({ value, onChange, onSearch }) {
 
 export default function App() {
   const [page, setPage] = useState('search');
-  const [stay, setStay] = useState({ checkIn: '2026-11-20', checkOut: '2026-11-22', guests: 2 });
+  const [stay, setStay] = useState({ checkIn: '2026-11-27', checkOut: '2026-11-29', guests: 2 });
   const [room, setRoom] = useState(null);
   const [guest, setGuest] = useState({ name: '', email: '', phone: '' });
   const [bookingReference, setBookingReference] = useState(DEMO_REFERENCE);
@@ -106,6 +107,11 @@ export default function App() {
   const [arrivalSubmitted, setArrivalSubmitted] = useState(false);
   const [checkInApproved, setCheckInApproved] = useState(false);
   const [preference, setPreference] = useState('Quiet stay · Relaxation');
+  const [availableRooms, setAvailableRooms] = useState(rooms);
+  const [booking, setBooking] = useState(null);
+  const [guestAccessToken, setGuestAccessToken] = useState('');
+  const [paymentReference, setPaymentReference] = useState('');
+  const [busy, setBusy] = useState(false);
 
   // This is shared screen state for the demo. A reload starts fresh; a backend
   // will become the source of truth for real bookings, payment, and requests.
@@ -115,20 +121,58 @@ export default function App() {
   }, [stay.checkIn, stay.checkOut]);
   const subtotal = room ? room.pricePerNight * nights : 0;
   const vat = Math.round(subtotal * VAT_RATE);
-  const total = subtotal + vat;
+  // The API stores prices in kobo; the visual demo data is already in naira.
+  const total = booking ? booking.totalAmount / 100 : subtotal + vat;
+
+  // Paystack returns the guest here after checkout. Verify the reference with
+  // our backend; never trust the browser redirect itself as proof of payment.
+  useEffect(() => {
+    const reference = new URLSearchParams(window.location.search).get('reference');
+    if (!reference) return;
+    const saved = sessionStorage.getItem('ruby-checkout');
+    if (saved) {
+      const checkout = JSON.parse(saved);
+      setBooking(checkout.booking);
+      setRoom(checkout.room);
+      setGuest(checkout.guest);
+      setStay(checkout.stay);
+      setBookingReference(checkout.booking.bookingReference);
+    }
+    setPaymentReference(reference);
+    setPage('verifying');
+    verifyPaystack(reference).then((result) => {
+      setPaymentState(result.payment?.status === 'verified' ? 'paid' : 'failed');
+      setBooking(result.booking || null);
+      setPage(result.payment?.status === 'verified' && result.booking?.status === 'confirmed' ? 'confirmed' : 'failed');
+      sessionStorage.removeItem('ruby-checkout');
+    }).catch((error) => {
+      setNotice(error.message);
+      setPage('verifying');
+    });
+  }, []);
 
   function updateStay(field, fieldValue) {
     setStay((current) => ({ ...current, [field]: fieldValue }));
     setNotice('');
   }
 
-  function searchRooms(event) {
+  async function searchRooms(event) {
     event.preventDefault();
     if (stay.checkOut <= stay.checkIn) {
       setNotice('Check-out must be after check-in. Please choose new dates.');
       return;
     }
     setNotice('');
+    setBusy(true);
+    try {
+      // Convert API room records into the same shape the existing room cards use.
+      const result = await getAvailableRooms(stay);
+      setAvailableRooms(result.map((item) => ({ ...item, image: item.imageUrl || '/images/standardroom.jpg', imageAlt: item.imageAlt || item.name, pricePerNight: item.pricePerNight / 100, features: item.features || [] })));
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setBusy(false);
+    }
     setPage('search');
     document.getElementById('rooms-list')?.scrollIntoView({ behavior: 'smooth' });
   }
@@ -143,19 +187,38 @@ export default function App() {
     setPage('guest');
   }
 
-  function submitGuestDetails(event) {
+  async function submitGuestDetails(event) {
     event.preventDefault();
-    // Backend: POST /api/bookings with stay, room ID, and guest details.
-    // The response should include bookingId, bookingReference, totals, and status.
-    setBookingReference(DEMO_REFERENCE);
-    setPage('payment');
+    setBusy(true);
+    setNotice('');
+    try {
+      const created = await createBooking({ roomId: room.id, guestName: guest.name, guestEmail: guest.email, guestPhone: guest.phone, checkIn: stay.checkIn, checkOut: stay.checkOut, guests: stay.guests });
+      setBooking(created);
+      setBookingReference(created.bookingReference);
+      setPaymentState('pending');
+      setPage('payment');
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setBusy(false);
+    }
   }
 
-  function openDemoCheckout() {
-    // Backend: ask the server to create a booking and initialize Paystack.
-    // The server returns a hosted checkout URL; never put secret keys in React.
-    setPaymentState('pending');
-    setPage('provider');
+  async function openDemoCheckout() {
+    if (!booking?.id) { setNotice('Create the booking first, then continue to Paystack.'); return; }
+    setBusy(true);
+    setNotice('');
+    try {
+      const payment = await initializePaystack(booking.id);
+      setPaymentReference(payment.paymentReference);
+      // Keep the guest context while Paystack temporarily takes over the browser.
+      sessionStorage.setItem('ruby-checkout', JSON.stringify({ booking, room, guest, stay }));
+      window.location.assign(payment.authorizationUrl);
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   function simulatePayment(result) {
@@ -164,31 +227,54 @@ export default function App() {
     setPage(result === 'failed' ? 'failed' : 'verifying');
   }
 
-  function confirmPayment() {
-    // Backend: GET /api/payments/{reference}/verify. Only its response confirms a stay.
-    setPaymentState('paid');
-    setPage('confirmed');
+  async function confirmPayment() {
+    if (!paymentReference) { setNotice('No payment reference is available to verify.'); return; }
+    setBusy(true);
+    try {
+      const result = await verifyPaystack(paymentReference);
+      const paid = result.payment?.status === 'verified' && result.booking?.status === 'confirmed';
+      setBooking(result.booking || booking);
+      setPaymentState(paid ? 'paid' : 'failed');
+      setPage(paid ? 'confirmed' : 'failed');
+    } catch (error) { setNotice(error.message); }
+    finally { setBusy(false); }
   }
 
-  function lookupBooking(event) {
+  async function lookupBooking(event) {
     event.preventDefault();
-    // Backend: GET /api/bookings/lookup?reference=...&email=... (validate both fields).
-    const emailMatches = !guest.email || guest.email.toLowerCase() === lookupEmail.trim().toLowerCase();
-    if (bookingReference.trim().toUpperCase() === DEMO_REFERENCE && emailMatches) {
-      setLookupMessage('Demo booking found.');
-      setPage('booking');
-    } else {
-      setLookupMessage('We could not find that booking. Check the reference and booking email.');
-    }
+    setBusy(true);
+    try {
+      const result = await findBooking({ bookingReference, email: lookupEmail });
+      const found = result.booking;
+      setBooking(found); setGuestAccessToken(result.guestAccessToken); setBookingReference(found.bookingReference);
+      setGuest({ name: found.guestName, email: found.guestEmail, phone: found.guestPhone || '' });
+      setStay({ checkIn: String(found.checkIn).slice(0, 10), checkOut: String(found.checkOut).slice(0, 10), guests: found.guests });
+      if (found.room) setRoom({ ...found.room, id: found.roomId, image: found.room.imageUrl || '/images/standardroom.jpg', imageAlt: found.room.imageAlt || found.room.name, pricePerNight: found.nightlyRate / 100, features: found.room.features || [] });
+      setPaymentState(found.status === 'confirmed' ? 'paid' : 'pending');
+      setLookupMessage('Booking found.'); setPage('booking');
+    } catch (error) { setLookupMessage(error.message); }
+    finally { setBusy(false); }
   }
 
-  function submitService(event) {
+  async function submitService(event) {
     event.preventDefault();
-    // Backend: POST /api/bookings/{bookingId}/requests; return a request ID and status.
-    const nextRequest = { id: `REQ-${1042 + requests.length}`, service, note: serviceNote.trim(), status: 'Received', time: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) };
-    setRequests((current) => [nextRequest, ...current]);
-    setServiceNote('');
-    setPage('tracking');
+    if (!booking?.id || !guestAccessToken) { setNotice('Look up your booking with its reference and email before requesting a service.'); return; }
+    const description = serviceNote.trim() || `Please arrange: ${service}`;
+    setBusy(true);
+    try {
+      const created = await createServiceRequest(booking.id, guestAccessToken, { category: service, description });
+      setRequests((current) => [{ id: created.id, service: created.category || service, note: created.description || description, status: created.status || 'received', time: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) }, ...current]);
+      setServiceNote(''); setPage('tracking');
+    } catch (error) { setNotice(error.message); }
+    finally { setBusy(false); }
+  }
+
+  async function refreshRequests() {
+    if (!booking?.id || !guestAccessToken) return;
+    try {
+      const result = await getServiceRequests(booking.id, guestAccessToken);
+      setRequests(result.map((item) => ({ id: item.id, service: item.category, note: item.description, status: item.status === 'in_progress' ? 'In progress' : item.status === 'completed' ? 'Completed' : 'Received', time: new Date(item.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) })));
+    } catch (error) { setNotice(error.message); }
   }
 
   function updateRequestStatus(requestId, nextStatus) {
@@ -204,12 +290,13 @@ export default function App() {
 
   return (
     <div className="page-shell">
-      <Header onNavigate={(next) => { setNotice(''); setPage(next); }} />
+      <Header onNavigate={(next) => { setNotice(''); setPage(next); if (next === 'tracking') refreshRequests(); }} />
       <main className="app-main">
+        {notice && page !== 'search' && <p className="form-message" role="alert">{notice}</p>}
         {page === 'search' && <>
           <section className="hero" aria-labelledby="hero-title"><div className="hero-image" role="img" aria-label="A peaceful hotel setting at sunset" /><div className="hero-shade" /><div className="hero-copy"><span className="hero-kicker">A WARM WELCOME TO ABUJA</span><h1 id="hero-title">Your perfect stay,<br />without the wait.</h1><p>Thoughtful comfort, right where you need it.</p></div><div className="hero-caption">A quieter kind of city escape</div></section>
           <section className="search-panel" aria-label="Find available rooms"><div className="search-heading"><div><p className="eyebrow">PLAN YOUR STAY</p><h2>When can we welcome you?</h2></div><span className="search-note"><Wifi size={15} /> Free Wi-Fi in every room</span></div><BookingSearch value={stay} onChange={updateStay} onSearch={searchRooms} />{notice && <p className="form-message" role="alert">{notice}</p>}</section>
-          <section className="rooms-section" id="rooms-list"><div className="section-heading"><div><p className="eyebrow">MADE FOR YOUR KIND OF REST</p><h2>Find a room to love</h2><p className="section-intro">Explore spaces designed to make every moment feel easy.</p></div><span className="room-count">03 <span>ROOM TYPES</span></span></div><div className="room-grid">{rooms.map((item) => <RoomCard key={item.id} room={item} nights={nights} onChoose={startBooking} />)}</div><p className="rate-note">Example availability and rates for this demo. Rates exclude 7.5% VAT.</p></section>
+          <section className="rooms-section" id="rooms-list"><div className="section-heading"><div><p className="eyebrow">MADE FOR YOUR KIND OF REST</p><h2>Find a room to love</h2><p className="section-intro">Explore spaces designed to make every moment feel easy.</p></div><span className="room-count">{String(availableRooms.length).padStart(2, '0')} <span>ROOM TYPES</span></span></div>{notice && <p className="form-message" role="alert">{notice}</p>}<div className="room-grid">{availableRooms.map((item) => <RoomCard key={item.id} room={item} nights={nights} onChoose={startBooking} />)}</div><p className="rate-note">Room availability and rates are returned by the hotel backend.</p></section>
         </>}
 
         {page === 'room' && <><BackButton onClick={() => setPage('search')}>Back to rooms</BackButton><PageTitle eyebrow="02 / 09 · ROOM DETAILS" title="Make yourself at home.">Choose a room for {stay.checkIn} to {stay.checkOut}.</PageTitle><div className="content-grid"><div><img className="detail-image" src={room?.image} alt={room?.imageAlt} /><Panel><p className="eyebrow">ABOUT THE ROOM</p><h2>{room?.name}</h2><p>{room?.description} Your stay includes Wi-Fi, air conditioning and access to the gym.</p><div className="feature-list">{room?.features.map((feature) => <span key={feature}>{feature}</span>)}</div></Panel><Panel><h3>Your dates</h3><p>{stay.checkIn} → {stay.checkOut} · {nights} nights · {stay.guests} guests</p><button className="text-button" onClick={() => setPage('search')}>Change dates</button></Panel></div><aside><StayCard room={room} checkIn={stay.checkIn} checkOut={stay.checkOut} guests={stay.guests} nights={nights} total={total} /><div className="button-stack"><button className="button button-primary" onClick={continueToGuestDetails}>Continue with this room <ArrowRight size={15} /></button><p className="fine-print">No payment is taken until checkout. Example rates for this demo.</p></div></aside></div></>}
@@ -232,7 +319,7 @@ export default function App() {
 
         {page === 'concierge' && <><BackButton onClick={() => setPage('booking')}>Back to my booking</BackButton><PageTitle eyebrow="08 / 09 · CONCIERGE REQUEST" title="What can we help with?">For booking {bookingReference} · {room?.name || 'Deluxe room'}</PageTitle><div className="content-grid"><form className="form-panel" onSubmit={submitService}><label className="field"><span>Choose a service</span><select value={service} onChange={(event) => setService(event.target.value)}><option>Extra towels</option><option>Room cleaning</option><option>Airport pickup</option><option>Food and drinks</option></select></label><div className="service-hint"><ConciergeBell size={18} /><span>{service === 'Extra towels' ? 'Fresh towels delivered to your room.' : service === 'Room cleaning' ? 'Refresh your room during your stay.' : service === 'Airport pickup' ? 'Share your flight details in the note.' : 'Ask the team about available options.'}</span></div><label className="field"><span>Note (optional)</span><textarea rows="4" value={serviceNote} onChange={(event) => setServiceNote(event.target.value)} placeholder="Anything else the team should know?" /></label><p className="fine-print">Any service charges will be agreed with reception. No extra payment is collected here.</p><button className="button button-primary full-width" type="submit">Submit request <ArrowRight size={15} /></button></form><aside><StayCard room={room} checkIn={stay.checkIn} checkOut={stay.checkOut} guests={stay.guests} nights={nights} total={total} /><Panel><h3>What happens next?</h3><p>Received → In progress → Completed</p><p className="fine-print">Check the latest status from your booking.</p></Panel></aside></div></>}
 
-        {page === 'tracking' && <><BackButton onClick={() => setPage('booking')}>Back to my booking</BackButton><PageTitle eyebrow="09 / 09 · SERVICE TRACKING" title="We're taking care of it.">Request · {requests[0]?.id || 'No request yet'} · Booking {bookingReference}</PageTitle><div className="content-grid"><div className="request-list">{requests.length === 0 ? <Panel><h3>No service requests yet</h3><p>When you submit a concierge request, its status will appear here.</p><button className="button button-primary" onClick={() => setPage('concierge')}>Request a service</button></Panel> : requests.map((request) => <Panel key={request.id} className="request-card"><span className={`status-chip ${request.status === 'Completed' ? 'status-success' : 'status-pending'}`}>{request.service.toUpperCase()} · {request.status.toUpperCase()}</span><h3>Your request is with {request.status === 'Completed' ? 'the team' : 'housekeeping'}.</h3><p>{request.id} · {request.time}</p><p>{request.note || 'Your request was sent to the hotel.'}</p><div className="request-timeline"><span className="done">1 · Received</span><span className={request.status !== 'Received' ? 'done' : ''}>2 · In progress</span><span className={request.status === 'Completed' ? 'done' : ''}>3 · Completed</span></div></Panel>)}</div><aside><Panel><h3>Your requests</h3><p>{requests.length} request{requests.length === 1 ? '' : 's'} for this stay</p><button className="button button-primary full-width" onClick={() => setPage('concierge')}>Request another service</button><button className="text-button centered" onClick={() => setPage('tracking')}>Refresh status</button></Panel></aside></div></>}
+        {page === 'tracking' && <><BackButton onClick={() => setPage('booking')}>Back to my booking</BackButton><PageTitle eyebrow="09 / 09 · SERVICE TRACKING" title="We're taking care of it.">Request · {requests[0]?.id || 'No request yet'} · Booking {bookingReference}</PageTitle><div className="content-grid"><div className="request-list">{requests.length === 0 ? <Panel><h3>No service requests yet</h3><p>When you submit a concierge request, its status will appear here.</p><button className="button button-primary" onClick={() => setPage('concierge')}>Request a service</button></Panel> : requests.map((request) => <Panel key={request.id} className="request-card"><span className={`status-chip ${request.status === 'Completed' ? 'status-success' : 'status-pending'}`}>{request.service.toUpperCase()} · {request.status.toUpperCase()}</span><h3>Your request is with {request.status === 'Completed' ? 'the team' : 'housekeeping'}.</h3><p>{request.id} · {request.time}</p><p>{request.note || 'Your request was sent to the hotel.'}</p><div className="request-timeline"><span className="done">1 · Received</span><span className={request.status !== 'Received' ? 'done' : ''}>2 · In progress</span><span className={request.status === 'Completed' ? 'done' : ''}>3 · Completed</span></div></Panel>)}</div><aside><Panel><h3>Your requests</h3><p>{requests.length} request{requests.length === 1 ? '' : 's'} for this stay</p><button className="button button-primary full-width" onClick={() => setPage('concierge')}>Request another service</button><button className="text-button centered" onClick={refreshRequests}>Refresh status</button></Panel></aside></div></>}
 
         {page === 'arrival' && <><BackButton onClick={() => setPage('booking')}>Back to my booking</BackButton><PageTitle eyebrow="P1 · STRETCH 10 · AFTER CORE" title="Arrive a little more relaxed.">Pre-arrival check-in · {bookingReference}</PageTitle><div className="content-grid"><form className="form-panel" onSubmit={(event) => { event.preventDefault(); /* Backend: POST /api/bookings/{bookingId}/pre-arrival. Staff review is still required. */ setArrivalSubmitted(true); }}><p className="eyebrow">YOUR ARRIVAL</p><label className="field"><span>Expected arrival</span><select value={arrival.time} onChange={(event) => setArrival({ ...arrival, time: event.target.value })}><option>2:00 pm</option><option>3:00 pm</option><option>4:00 pm</option><option>5:00 pm</option><option>6:00 pm</option></select></label><label className="field"><span>Special requests (optional)</span><textarea rows="3" value={arrival.note} onChange={(event) => setArrival({ ...arrival, note: event.target.value })} placeholder="A quiet room, if available." /></label><label className="field"><span>Contact number</span><input type="tel" value={arrival.phone} onChange={(event) => setArrival({ ...arrival, phone: event.target.value })} placeholder={guest.phone || '+234 800 000 0000'} /></label><button className="button button-primary full-width" type="submit">Submit pre-arrival details</button>{arrivalSubmitted && <p className="success-message" role="status">Details submitted for staff review. Your booking remains confirmed.</p>}<p className="fine-print">Reception reviews your details before check-in is approved.</p></form><aside><Panel><h3>Check-in status</h3><strong className="status-text">{arrivalSubmitted ? 'Submitted · Awaiting reception review' : 'Not submitted'}</strong><p>Next: submit details → staff review → approved.</p></Panel><Panel><h3>Identity status · Not verified</h3><p>Bring a valid ID to reception. This demo does not upload documents or verify identity.</p></Panel></aside></div></>}
 
