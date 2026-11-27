@@ -13,7 +13,7 @@ const app = express();
 
 const allowedOrigins = [
     "http://localhost:5173",
-    "http://ruby-hotel-guest-experience.vercel.app"
+    "https://ruby-hotel-guest-experience.vercel.app"
 ];
 app.use(cors({ origin: allowedOrigins,credentials: true,}));
 app.use("/api/payments/paystack/webhook", express.raw({ type: "application/json"}));
